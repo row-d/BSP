@@ -22,7 +22,7 @@ pub async fn bsp_sum(workers_data: Vec<Vec<i32>>) -> i32 {
     for (id, data) in workers_data.into_iter().enumerate() {
         let barrier = Arc::clone(&barrier);
         let partials = Arc::clone(&partials);
-        let mut result_tx = if id == 0 { result_tx.take() } else { None };
+        let mut worker_result_tx = if id == 0 { result_tx.take() } else { None };
 
         handles.push(tokio::spawn(async move {
             // Superstep 1: local compute.
@@ -36,12 +36,12 @@ pub async fn bsp_sum(workers_data: Vec<Vec<i32>>) -> i32 {
             barrier.wait().await;
 
             // Superstep 2: single worker aggregation.
-            if let Some(tx) = result_tx.take() {
+            if let Some(tx) = worker_result_tx.take() {
                 let total = {
                     let partials = partials.lock().await;
                     partials.iter().sum::<i32>()
                 };
-                let _ = tx.send(total);
+                tx.send(total).expect("result receiver dropped");
             }
         }));
     }
