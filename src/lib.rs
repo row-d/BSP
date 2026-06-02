@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::{Barrier, Mutex};
+use tokio::sync::{oneshot, Barrier, Mutex};
 
 /// Runs a simple two-phase BSP-style computation.
 ///
@@ -14,14 +14,15 @@ pub async fn bsp_sum(workers_data: Vec<Vec<i32>>) -> i32 {
     let workers = workers_data.len();
     let barrier = Arc::new(Barrier::new(workers));
     let partials = Arc::new(Mutex::new(vec![0; workers]));
-    let result = Arc::new(Mutex::new(0));
+    let (result_tx, result_rx) = oneshot::channel();
+    let mut result_tx = Some(result_tx);
 
     let mut handles = Vec::with_capacity(workers);
 
     for (id, data) in workers_data.into_iter().enumerate() {
         let barrier = Arc::clone(&barrier);
         let partials = Arc::clone(&partials);
-        let result = Arc::clone(&result);
+        let mut result_tx = if id == 0 { result_tx.take() } else { None };
 
         handles.push(tokio::spawn(async move {
             // Superstep 1: local compute.
@@ -35,17 +36,13 @@ pub async fn bsp_sum(workers_data: Vec<Vec<i32>>) -> i32 {
             barrier.wait().await;
 
             // Superstep 2: single worker aggregation.
-            if id == 0 {
+            if let Some(tx) = result_tx.take() {
                 let total = {
                     let partials = partials.lock().await;
                     partials.iter().sum::<i32>()
                 };
-                let mut shared_result = result.lock().await;
-                *shared_result = total;
+                let _ = tx.send(total);
             }
-
-            // Ensure all workers finish the superstep before exit.
-            barrier.wait().await;
         }));
     }
 
@@ -53,8 +50,7 @@ pub async fn bsp_sum(workers_data: Vec<Vec<i32>>) -> i32 {
         handle.await.expect("worker task panicked");
     }
 
-    let final_total = *result.lock().await;
-    final_total
+    result_rx.await.expect("worker 0 did not produce a result")
 }
 
 #[cfg(test)]
